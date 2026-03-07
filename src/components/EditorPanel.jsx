@@ -80,7 +80,7 @@ export default function EditorPanel({ lang, value, onChange, readOnly, status = 
           options={{
             readOnly,
             minimap: { enabled: false },
-            fontSize: 13,
+            fontSize: 15,
             fontFamily: "'JetBrains Mono', monospace",
             fontLigatures: true,
             lineNumbers: 'on',

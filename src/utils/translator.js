@@ -25,10 +25,18 @@ const OPERATOR_MAP_TO_CPP = {
 
 // ─── Utility ─────────────────────────────────────────────────────────────────
 
+function escapeRegex(s) {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
 function applyOperatorMap(code, map) {
   let result = code
   for (const [from, to] of Object.entries(map)) {
-    result = result.replace(new RegExp(`\\b${from}\\b`, 'g'), to)
+    const isWord = /^\w+$/.test(from)
+    const pattern = isWord
+      ? new RegExp(`\\b${escapeRegex(from)}\\b`, 'g')
+      : new RegExp(escapeRegex(from), 'g')
+    result = result.replace(pattern, to)
   }
   return result
 }
