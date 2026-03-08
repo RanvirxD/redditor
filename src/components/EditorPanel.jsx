@@ -13,9 +13,11 @@ const MONACO_LANG = {
 }
 
 const STATUS_STYLE = {
-  ready: { color: '#4ade80', label: 'AST Ready' },
+  ready:       { color: '#4ade80', label: 'AST Ready' },
+  llm_ready:   { color: '#818cf8', label: 'LLM Ready' },
   translating: { color: '#facc15', label: 'Translating...' },
-  source: { color: '#818cf8', label: 'Source' },
+  source:      { color: '#818cf8', label: 'Editable' },
+  error:       { color: '#f87171', label: 'Error' },
 }
 
 export default function EditorPanel({ lang, value, onChange, readOnly, status = 'ready' }) {
@@ -80,7 +82,7 @@ export default function EditorPanel({ lang, value, onChange, readOnly, status = 
           options={{
             readOnly,
             minimap: { enabled: false },
-            fontSize: 15,
+            fontSize: 17,
             fontFamily: "'JetBrains Mono', monospace",
             fontLigatures: true,
             lineNumbers: 'on',

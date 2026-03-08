@@ -323,7 +323,8 @@ export function translateToPython(javaCode) {
   let switchDepth = 0
   let firstCase = true
 
-  const pad = () => ind(depth)
+  // When inside a skipped boilerplate class, subtract 1 level from output depth
+  const pad = () => ind(skipClassDepth !== -1 ? Math.max(0, depth - skipClassDepth - 1) : depth)
 
   for (const raw of lines) {
     const { type, line, ...rest } = classifyLine(raw)
