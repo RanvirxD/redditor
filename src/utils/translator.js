@@ -1,25 +1,6 @@
 /**
  * translator.js
- * Token-based multi-language AST translator — Java → Python / C++
- *
- * Handles:
- *  - imports (java.util.* → proper equivalents or stripped)
- *  - access modifiers (public/private/protected)
- *  - class declarations + constructors
- *  - field declarations inside classes
- *  - ArrayList / collections → list / vector
- *  - Scanner → input() / cin
- *  - System.out.println / print
- *  - if / else if / else
- *  - for (standard + enhanced) / while / do-while
- *  - switch statements (classic + arrow syntax)
- *  - method declarations (with self injection for Python)
- *  - @Override / @annotations
- *  - toString() → __str__
- *  - String.format → f-string / sprintf
- *  - new ClassName() → ClassName() for Python
- *  - return statements
- *  - operator maps (&&, ||, !, true, false, null)
+ * Token-based AST translator — Java → Python / C++
  */
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -32,19 +13,8 @@ const TYPE_TO_CPP = {
   String: 'string', void: 'void',
 }
 
-const IMPORT_TO_CPP = {
-  'java.util.ArrayList': '#include <vector>',
-  'java.util.List':      '#include <vector>',
-  'java.util.LinkedList':'#include <list>',
-  'java.util.HashMap':   '#include <unordered_map>',
-  'java.util.Map':       '#include <map>',
-  'java.util.Scanner':   null,
-  'java.util.Arrays':    '#include <algorithm>',
-  'java.lang.Math':      '#include <cmath>',
-}
-
 const OP_TO_PYTHON = {
-  '&&': 'and', '||': 'or', '!': 'not ', 'true': 'True', 'false': 'False', 'null': 'None',
+  '&&': 'and', '||': 'or', 'true': 'True', 'false': 'False', 'null': 'None',
 }
 
 const OP_TO_CPP = {
@@ -59,7 +29,8 @@ function escapeRegex(s) {
 
 function applyOpMap(code, map) {
   let result = code
-  for (const [from, to] of Object.entries(map)) {
+  const entries = Object.entries(map).sort((a, b) => b[0].length - a[0].length)
+  for (const [from, to] of entries) {
     const isWord = /^\w+$/.test(from)
     const pat = isWord
       ? new RegExp(`\\b${escapeRegex(from)}\\b`, 'g')
@@ -69,34 +40,77 @@ function applyOpMap(code, map) {
   return result
 }
 
-function ind(depth) {
-  return '    '.repeat(depth)
+function ind(depth) { return '    '.repeat(depth) }
+function stripSemi(s) { return s.replace(/;+$/, '').trim() }
+
+function stripAccessModifiers(s) {
+  return s.replace(/\b(public|private|protected|final|abstract|synchronized)\s+/g, '').trim()
 }
 
-function stripSemi(s) {
-  return s.replace(/;+$/, '').trim()
+// Convert Java ternary a ? b : c → Python b if a else c
+function convertTernary(line) {
+  return line.replace(/(.+?)\s*\?\s*(.+?)\s*:\s*(.+)/, '$2 if $1 else $3')
 }
 
-function stripAccessModifiersKeepStatic(s) {
-  return s
-    .replace(/\b(public|private|protected|final|abstract|synchronized)\s+/g, '')
-    .trim()
+// Convert string concat "text" + var → Python f"text{var}", C++ "text" << var
+function convertStringConcat(line, lang) {
+  if (lang === 'python') return line.replace(/"([^"]*)"\s*\+\s*(\w+)/g, 'f"$1{$2}"')
+  if (lang === 'cpp')    return line.replace(/"([^"]*)"\s*\+\s*(\w+)/g, '"$1" << $2')
+  return line
+}
+
+// Convert Java lambdas (a, b) -> { return a-b; } → Python lambda / C++ []
+function convertLambda(line, lang) {
+  if (lang === 'python') {
+    return line.replace(/\(([^)]*)\)\s*->\s*\{?\s*([^}]+?)\s*\}?/g, 'lambda $1: ($2)')
+  }
+  if (lang === 'cpp') {
+    return line.replace(/\(([^)]*)\)\s*->\s*\{?\s*([^}]+?)\s*\}?/g, (_, params, body) => {
+      const parts = params.split(',').map(p => p.trim()).filter(Boolean)
+      const cppParams = parts.map(p => `auto& ${p}`).join(', ')
+      const trimmed = body.trim()
+      return /\breturn\b/.test(trimmed)
+        ? `[](${cppParams}) { ${trimmed} }`
+        : `[](${cppParams}) { return ${trimmed}; }`
+    })
+  }
+  return line
+}
+
+// new Type[]{1,2,3} → Python [1,2,3] / C++ {1,2,3}
+function convertNewArray(val, lang) {
+  if (lang === 'python') return val.replace(/new\s+\w+\s*\[\s*\]\s*\{\s*(.+?)\s*\}/g, '[$1]')
+  if (lang === 'cpp')    return val.replace(/new\s+\w+\s*\[\s*\]\s*\{\s*(.+?)\s*\}/g, '{$1}')
+  return val
 }
 
 function convertCollectionType(type) {
   const m1 = type.match(/ArrayList<(.+)>/)
-  if (m1) return { python: 'list', cpp: `vector<${m1[1]}>` }
+  if (m1) {
+    const inner = m1[1].includes('[]')
+      ? `vector<vector<${m1[1].replace(/\[\]/g, '')}>>`
+      : `vector<${m1[1]}>`
+    return { python: 'list', cpp: inner }
+  }
   const m2 = type.match(/List<(.+)>/)
-  if (m2) return { python: 'list', cpp: `vector<${m2[1]}>` }
+  if (m2) {
+    const inner = m2[1].includes('[]')
+      ? `vector<vector<${m2[1].replace(/\[\]/g, '')}>>`
+      : `vector<${m2[1]}>`
+    return { python: 'list', cpp: inner }
+  }
   const m3 = type.match(/HashMap<(.+),\s*(.+)>/)
   if (m3) return { python: 'dict', cpp: `unordered_map<${m3[1]}, ${m3[2]}>` }
+  const m4 = type.match(/PriorityQueue<(.+)>/)
+  if (m4) return { python: 'list', cpp: `priority_queue<${m4[1]}>` }
   return null
 }
 
 function convertNewCollection(val) {
-  if (/new\s+ArrayList(<.*>)?\(\)/.test(val)) return { python: '[]', cpp: '{}' }
-  if (/new\s+LinkedList(<.*>)?\(\)/.test(val)) return { python: '[]', cpp: '{}' }
-  if (/new\s+HashMap(<.*>)?\(\)/.test(val)) return { python: '{}', cpp: '{}' }
+  if (/new\s+ArrayList(<.*>)?\(\)/.test(val))     return { python: '[]', cpp: '{}' }
+  if (/new\s+LinkedList(<.*>)?\(\)/.test(val))    return { python: '[]', cpp: '{}' }
+  if (/new\s+HashMap(<.*>)?\(\)/.test(val))       return { python: '{}', cpp: '{}' }
+  if (/new\s+PriorityQueue(<.*>)?\(\)/.test(val)) return { python: '[]', cpp: '{}' }
   return null
 }
 
@@ -106,24 +120,40 @@ function convertNewInstance(val) {
 
 function convertCollectionMethodsPython(line) {
   return line
-    .replace(/(\w+)\.add\((.+)\)/g, '$1.append($2)')
-    .replace(/(\w+)\.isEmpty\(\)/g, 'len($1) == 0')
-    .replace(/(\w+)\.size\(\)/g, 'len($1)')
-    .replace(/(\w+)\.get\((\d+)\)/g, '$1[$2]')
-    .replace(/(\w+)\.remove\((\d+)\)/g, '$1.pop($2)')
+    .replace(/(\w+)\.add\((.+)\)/g,      '$1.append($2)')
+    .replace(/(\w+)\.offer\((.+)\)/g,    'heapq.heappush($1, $2)')
+    .replace(/(\w+)\.peek\(\)/g,         '$1[0]')
+    .replace(/(\w+)\.poll\(\)/g,         'heapq.heappop($1)')
+    .replace(/(\w+)\.isEmpty\(\)/g,      'len($1) == 0')
+    .replace(/(\w+)\.size\(\)/g,         'len($1)')
+    .replace(/(\w+)\.get\((\d+)\)/g,     '$1[$2]')
+    .replace(/(\w+)\.remove\((\d+)\)/g,  '$1.pop($2)')
     .replace(/(\w+)\.contains\((.+)\)/g, '$2 in $1')
-    .replace(/(\w+)\.clear\(\)/g, '$1.clear()')
+    .replace(/(\w+)\.clear\(\)/g,        '$1.clear()')
+    .replace(/Collections\.sort\((\w+)\)/g, '$1.sort()')
 }
 
 function convertCollectionMethodsCpp(line) {
   return line
-    .replace(/(\w+)\.add\((.+)\)/g, '$1.push_back($2)')
-    .replace(/(\w+)\.isEmpty\(\)/g, '$1.empty()')
-    .replace(/(\w+)\.size\(\)/g, '$1.size()')
-    .replace(/(\w+)\.get\((\d+)\)/g, '$1[$2]')
-    .replace(/(\w+)\.remove\((\d+)\)/g, '$1.erase($1.begin() + $2)')
+    .replace(/(\w+)\.add\((.+)\)/g,      '$1.push_back($2)')
+    .replace(/(\w+)\.offer\((.+)\)/g,    '$1.push($2)')
+    .replace(/(\w+)\.peek\(\)/g,         '$1.top()')
+    .replace(/(\w+)\.poll\(\)/g,         '$1.pop()')
+    .replace(/(\w+)\.isEmpty\(\)/g,      '$1.empty()')
+    .replace(/(\w+)\.size\(\)/g,         '$1.size()')
+    .replace(/(\w+)\.get\((\d+)\)/g,     '$1[$2]')
+    .replace(/(\w+)\.remove\((\d+)\)/g,  '$1.erase($1.begin() + $2)')
     .replace(/(\w+)\.contains\((.+)\)/g, 'find($1.begin(), $1.end(), $2) != $1.end()')
-    .replace(/(\w+)\.clear\(\)/g, '$1.clear()')
+    .replace(/(\w+)\.clear\(\)/g,        '$1.clear()')
+    .replace(/Collections\.sort\((\w+)\)/g, 'sort($1.begin(), $1.end())')
+}
+
+function convertScannerCallsPython(line) {
+  return line
+    .replace(/scanner\.nextInt\(\)/g,    'int(input())')
+    .replace(/scanner\.nextDouble\(\)/g, 'float(input())')
+    .replace(/scanner\.nextLine\(\)/g,   'input()')
+    .replace(/scanner\.next\(\)/g,       'input()')
 }
 
 function convertStringFormatPython(line) {
@@ -145,6 +175,11 @@ function extractCondition(line) {
   return m ? m[1].trim() : ''
 }
 
+function extractPrintArg(line) {
+  const m = line.match(/System\.out\.print(?:ln|f)?\((.+)\);?$/)
+  return m ? m[1].trim() : '""'
+}
+
 // ─── Line Classifier ──────────────────────────────────────────────────────────
 
 function classifyLine(raw) {
@@ -158,14 +193,21 @@ function classifyLine(raw) {
   if (line.startsWith('//')) return { type: 'comment', line }
   if (line.startsWith('/*') || line.startsWith('*') || line.startsWith('*/')) return { type: 'comment', line }
 
-  const importMatch = line.match(/^import\s+([\w.]+);$/)
+  // skip scanner.close() — no equivalent needed
+  if (/scanner\.close\(\)/.test(line)) return { type: 'skip' }
+
+  // Strip inline comments before structural matching — prevents comment text
+  // like '// Scanner class to read' from being matched as class declarations
+  const safe = line.replace(/\/\/.*$/, '').trim()
+
+  const importMatch = safe.match(/^import\s+([\w.]+);/)
   if (importMatch) return { type: 'import', line, pkg: importMatch[1] }
 
-  if (/^package\s+/.test(line)) return { type: 'skip' }
+  if (/^package\s+/.test(safe)) return { type: 'skip' }
 
-  if (/\bclass\s+\w+/.test(line)) {
-    const m = line.match(/\bclass\s+(\w+)(?:\s+extends\s+(\w+))?/)
-    return { type: 'class_decl', line, name: m[1], parent: m?.[2] }
+  if (/\bclass\s+\w+/.test(safe)) {
+    const m = safe.match(/\bclass\s+(\w+)(?:\s+extends\s+(\w+))?/)
+    return { type: 'class_decl', line: safe, name: m[1], parent: m?.[2] }
   }
 
   if (/public\s+static\s+void\s+main\s*\(/.test(line)) return { type: 'main_method', line }
@@ -184,17 +226,18 @@ function classifyLine(raw) {
     return { type: 'method_decl', line, returnType: methodMatch[1], name: methodMatch[2], params: methodMatch[3] }
   }
 
-  // this.field = value
   const thisAssign = line.match(/^this\.(\w+)\s*=\s*(.+);$/)
   if (thisAssign) return { type: 'this_assign', line, field: thisAssign[1], value: thisAssign[2] }
 
-  // Field with access modifier
   const fieldMatch = line.match(/^(?:public|private|protected|static|final)\s+(?:(?:public|private|protected|static|final)\s+)*([\w<>\[\]]+)\s+(\w+)\s*(?:=\s*(.+))?;$/)
   if (fieldMatch) return { type: 'field_decl', line, ftype: fieldMatch[1], fname: fieldMatch[2], fval: fieldMatch[3] }
 
-  // Local variable
+  if (/Scanner\s+\w+\s*=\s*new\s+Scanner/.test(line))             return { type: 'scanner_init', line }
+  if (/=\s*scanner\.(next|nextLine|nextInt|nextDouble)\(\)/.test(line)) return { type: 'scanner_input', line }
+  if (/scanner\.hasNext\w*\(\)/.test(line))                        return { type: 'scanner_has_next', line }
+
   const varMatch = line.match(/^([\w<>\[\]]+)\s+(\w+)\s*=\s*(.+);$/)
-  if (varMatch && (JAVA_PRIMITIVES.includes(varMatch[1]) || /ArrayList|List|HashMap|Map/.test(varMatch[1]))) {
+  if (varMatch && (JAVA_PRIMITIVES.includes(varMatch[1]) || /ArrayList|List|HashMap|Map|PriorityQueue|double\[\]|int\[\]/.test(varMatch[1]))) {
     return { type: 'var_decl', line, vtype: varMatch[1], vname: varMatch[2], vval: varMatch[3] }
   }
 
@@ -203,44 +246,41 @@ function classifyLine(raw) {
     return { type: 'var_decl_only', line, vtype: varOnlyMatch[1], vname: varOnlyMatch[2] }
   }
 
-  if (/System\.out\.println\(/.test(line)) return { type: 'print_ln', line }
-  if (/System\.out\.print\(/.test(line)) return { type: 'print', line }
-
-  if (/Scanner\s+\w+\s*=\s*new\s+Scanner/.test(line)) return { type: 'scanner_init', line }
-  if (/=\s*scanner\.(next|nextLine|nextInt|nextDouble)\(\)/.test(line)) return { type: 'scanner_input', line }
+  if (/System\.out\.println\(/.test(line))  return { type: 'print_ln', line }
+  if (/System\.out\.printf\(/.test(line))   return { type: 'print_f',  line }
+  if (/System\.out\.print\(/.test(line))    return { type: 'print',    line }
 
   if (/^switch\s*\(/.test(line)) return { type: 'switch_stmt', line }
   const caseArrow = line.match(/^case\s+(.+)\s*->\s*(.+);?$/)
   if (caseArrow) return { type: 'case_arrow', line, val: caseArrow[1].trim(), body: caseArrow[2].trim() }
   const caseColon = line.match(/^case\s+(.+):$/)
   if (caseColon) return { type: 'case_colon', line, val: caseColon[1].trim() }
-  if (/^default\s*[:\-]/.test(line)) return { type: 'case_default', line }
-  if (/^break;?$/.test(line)) return { type: 'break_stmt', line }
+  if (/^default\s*[:\-]/.test(line))  return { type: 'case_default', line }
+  if (/^break;?$/.test(line))         return { type: 'break_stmt', line }
 
-  if (/^if\s*\(/.test(line)) return { type: 'if_stmt', line }
+  if (/^if\s*\(/.test(line))                                         return { type: 'if_stmt', line }
   if (/^}\s*else\s+if\s*\(/.test(line) || /^else\s+if\s*\(/.test(line)) return { type: 'elif_stmt', line }
-  if (/^}\s*else\s*\{?$/.test(line) || /^else\s*\{?$/.test(line)) return { type: 'else_stmt', line }
+  if (/^}\s*else\s*\{?$/.test(line) || /^else\s*\{?$/.test(line))   return { type: 'else_stmt', line }
 
-  const forEachMatch = line.match(/^for\s*\(\s*(?:\w+\s+)?(\w+)\s+(\w+)\s*:\s*(\w+)\s*\)/)
+  // forEach method call
+  if (/\.forEach\(/.test(line)) return { type: 'foreach_method', line }
+
+  const forEachMatch = line.match(/^for\s*\(\s*(?:([\w<>\[\]]+)\s+)?(\w+)\s*:\s*(\w+)\s*\)/)
   if (forEachMatch) return { type: 'foreach', line, varName: forEachMatch[2], collection: forEachMatch[3] }
 
   const forMatch = line.match(/^for\s*\(\s*(?:int\s+)?(\w+)\s*=\s*([^;]+);\s*\1\s*([<>!=]+)\s*([^;]+);\s*(.+)\)/)
   if (forMatch) return { type: 'for_loop', line, varName: forMatch[1], start: forMatch[2].trim(), op: forMatch[3], end: forMatch[4].trim(), step: forMatch[5].trim() }
 
-  if (/^while\s*\(/.test(line)) return { type: 'while_loop', line }
-  if (/^do\s*\{?$/.test(line)) return { type: 'do_while_start', line }
-  if (/^}\s*while\s*\(/.test(line)) return { type: 'do_while_end', line }
-
-  if (/^return\b/.test(line)) return { type: 'return_stmt', line }
-  if (/^\}/.test(line)) return { type: 'close_brace', line }
+  if (/^while\s*\(/.test(line))          return { type: 'while_loop', line }
+  if (/^do\s*\{?$/.test(line))           return { type: 'do_while_start', line }
+  if (/^}\s*while\s*\(/.test(line))      return { type: 'do_while_end', line }
+  if (/^return\b/.test(line))            return { type: 'return_stmt', line }
+  if (/^\}/.test(line))                  return { type: 'close_brace', line }
 
   return { type: 'raw', line }
 }
 
-function extractPrintArg(line) {
-  const m = line.match(/System\.out\.print(?:ln)?\((.+)\);?$/)
-  return m ? m[1].trim() : '""'
-}
+// ─── Param helpers ────────────────────────────────────────────────────────────
 
 function paramsToPython(params, addSelf = true) {
   if (!params.trim()) return addSelf ? 'self' : ''
@@ -268,8 +308,16 @@ function paramsToCpp(params) {
 export function translateToPython(javaCode) {
   const lines = javaCode.split('\n')
   const out = []
+
+  if (/PriorityQueue/.test(javaCode)) out.push('import heapq')
+  if (/Math\./.test(javaCode))        out.push('import math')
+
+  // If code has a main method, the wrapping class is Java boilerplate — skip it
+  const hasMain = /public\s+static\s+void\s+main/.test(javaCode)
+
   let depth = 0
   let inClass = false
+  let skipClassDepth = -1   // depth at which we skipped a boilerplate class
   let inSwitch = false
   let switchVar = ''
   let switchDepth = 0
@@ -283,20 +331,10 @@ export function translateToPython(javaCode) {
     switch (type) {
       case 'blank': out.push(''); break
       case 'open_brace': depth++; break
-      case 'close_brace': {
-        if (depth > 0) depth--
-        if (inSwitch && depth <= switchDepth) inSwitch = false
-        break
-      }
       case 'skip': break
       case 'annotation': break
 
-      case 'import': {
-        const pkg = rest.pkg
-        if (pkg.includes('Math')) out.push('import math')
-        // All Java collection/IO imports are built-in in Python — skip
-        break
-      }
+      case 'import': break // all builtins in Python
 
       case 'comment': {
         const clean = line.replace(/^\/\/\s?/, '').replace(/^\/\*+\s?/, '').replace(/\*+\/$/, '').replace(/^\*+\s?/, '').trim()
@@ -305,10 +343,24 @@ export function translateToPython(javaCode) {
       }
 
       case 'class_decl': {
+        // If this file has a main method, the outermost class is Java boilerplate — skip it
+        if (hasMain && skipClassDepth === -1) {
+          skipClassDepth = depth  // remember we skipped a class at this depth
+          depth++                 // still need to track the brace
+          break
+        }
         const parent = rest.parent ? `(${rest.parent})` : ''
         out.push(`${pad()}class ${rest.name}${parent}:`)
         depth++
         inClass = true
+        break
+      }
+
+      case 'close_brace': {
+        if (depth > 0) depth--
+        // If we're closing the skipped boilerplate class, reset the skip tracker
+        if (depth === skipClassDepth) skipClassDepth = -1
+        if (inSwitch && depth <= switchDepth) inSwitch = false
         break
       }
 
@@ -333,12 +385,17 @@ export function translateToPython(javaCode) {
       }
 
       case 'field_decl': {
-        const coll = convertCollectionType(rest.ftype)
         const newColl = rest.fval ? convertNewCollection(rest.fval) : null
         if (newColl) {
           out.push(`${pad()}${rest.fname} = ${newColl.python}`)
         } else if (rest.fval) {
-          const val = applyOpMap(convertNewInstance(convertStringFormatPython(stripSemi(rest.fval))), OP_TO_PYTHON)
+          let val = stripSemi(rest.fval)
+          val = convertNewArray(val, 'python')
+          val = convertStringFormatPython(val)
+          val = convertScannerCallsPython(val)
+          val = convertLambda(val, 'python')
+          val = convertNewInstance(val)
+          val = applyOpMap(val, OP_TO_PYTHON)
           out.push(`${pad()}${rest.fname} = ${val}`)
         } else {
           out.push(`${pad()}${rest.fname} = None`)
@@ -347,7 +404,12 @@ export function translateToPython(javaCode) {
       }
 
       case 'this_assign': {
-        const val = applyOpMap(convertNewInstance(stripSemi(rest.value)), OP_TO_PYTHON)
+        let val = stripSemi(rest.value)
+        val = convertNewArray(val, 'python')
+        val = convertScannerCallsPython(val)
+        val = convertLambda(val, 'python')
+        val = convertNewInstance(val)
+        val = applyOpMap(val, OP_TO_PYTHON)
         out.push(`${pad()}self.${rest.field} = ${val}`)
         break
       }
@@ -357,9 +419,20 @@ export function translateToPython(javaCode) {
         if (newColl) {
           out.push(`${pad()}${rest.vname} = ${newColl.python}`)
         } else {
+          // Handle double[] / int[] = new T[count]
+          if (rest.vtype.includes('[]')) {
+            const sizeMatch = rest.vval.match(/new\s+\w+\s*\[\s*(.+)\s*\]/)
+            if (sizeMatch) {
+              out.push(`${pad()}${rest.vname} = [0] * ${sizeMatch[1]}`)
+              break
+            }
+          }
           let val = stripSemi(rest.vval)
           val = convertCollectionMethodsPython(val)
           val = convertStringFormatPython(val)
+          val = convertNewArray(val, 'python')
+          val = convertScannerCallsPython(val)
+          val = convertLambda(val, 'python')
           val = convertNewInstance(val)
           val = applyOpMap(val, OP_TO_PYTHON)
           out.push(`${pad()}${rest.vname} = ${val}`)
@@ -373,6 +446,7 @@ export function translateToPython(javaCode) {
       }
 
       case 'scanner_init': break
+      case 'scanner_has_next': break
 
       case 'scanner_input': {
         const vm = line.match(/(\w+)\s*=\s*scanner\.(next\w*)\(\)/)
@@ -384,14 +458,29 @@ export function translateToPython(javaCode) {
       }
 
       case 'print_ln': {
-        const arg = applyOpMap(convertStringFormatPython(extractPrintArg(line)), OP_TO_PYTHON)
+        let arg = extractPrintArg(line)
+        arg = convertStringFormatPython(arg)
+        arg = convertStringConcat(arg, 'python')
+        arg = applyOpMap(arg, OP_TO_PYTHON)
         out.push(`${pad()}print(${arg})`)
         break
       }
 
       case 'print': {
-        const arg = applyOpMap(convertStringFormatPython(extractPrintArg(line)), OP_TO_PYTHON)
+        let arg = extractPrintArg(line)
+        arg = convertStringFormatPython(arg)
+        arg = convertStringConcat(arg, 'python')
+        arg = applyOpMap(arg, OP_TO_PYTHON)
         out.push(`${pad()}print(${arg}, end='')`)
+        break
+      }
+
+      case 'print_f': {
+        let arg = extractPrintArg(line)
+        arg = convertStringFormatPython(arg)
+        arg = convertStringConcat(arg, 'python')
+        arg = applyOpMap(arg, OP_TO_PYTHON)
+        out.push(`${pad()}print(${arg})`)
         break
       }
 
@@ -458,7 +547,7 @@ export function translateToPython(javaCode) {
         const { varName, start, op, end, step } = rest
         let rangeStr
         if (start === '0' && op === '<') rangeStr = `range(${end})`
-        else if (op === '<') rangeStr = `range(${start}, ${end})`
+        else if (op === '<')  rangeStr = `range(${start}, ${end})`
         else if (op === '<=') rangeStr = `range(${start}, ${end} + 1)`
         else if (step.includes('--')) rangeStr = `range(${start}, ${end}, -1)`
         else rangeStr = `range(${start}, ${end})`
@@ -486,8 +575,24 @@ export function translateToPython(javaCode) {
       }
 
       case 'return_stmt': {
-        const val = applyOpMap(stripSemi(line.replace(/^return\s*/, '')), OP_TO_PYTHON)
+        // FIX: DO NOT add self. to return values — local vars are not fields
+        let val = stripSemi(line.replace(/^return\s*/, ''))
+        val = convertNewArray(val, 'python')
+        val = convertNewInstance(val)
+        val = applyOpMap(val, OP_TO_PYTHON)
         out.push(`${pad()}return${val ? ' ' + val : ''}`)
+        break
+      }
+
+      case 'foreach_method': {
+        const m = line.match(/(\w+)\.forEach\(([^)]+?)\s*(?:=>|->)\s*\{?(.+?)\}?\)/)
+        if (m) {
+          const param = m[2].trim()
+          let body = m[3].trim()
+          body = convertLambda(body, 'python')
+          out.push(`${pad()}for ${param} in ${m[1]}:`)
+          out.push(`${pad()}    ${body}`)
+        }
         break
       }
 
@@ -495,8 +600,13 @@ export function translateToPython(javaCode) {
         let cleaned = stripSemi(line)
         cleaned = convertCollectionMethodsPython(cleaned)
         cleaned = convertStringFormatPython(cleaned)
+        cleaned = convertNewArray(cleaned, 'python')
+        cleaned = convertScannerCallsPython(cleaned)
+        cleaned = convertLambda(cleaned, 'python')
         cleaned = convertNewInstance(cleaned)
         cleaned = applyOpMap(cleaned, OP_TO_PYTHON)
+        if (line.includes('?') && line.includes(':')) cleaned = convertTernary(cleaned)
+        cleaned = convertStringConcat(cleaned, 'python')
         cleaned = cleaned.replace(/^(public|private|protected|static|final)\s+/g, '')
         if (cleaned.trim()) out.push(`${pad()}${cleaned}`)
         break
@@ -513,10 +623,12 @@ export function translateToCpp(javaCode) {
   const lines = javaCode.split('\n')
 
   const includes = new Set(['#include <iostream>', '#include <string>'])
-  if (/ArrayList|List</.test(javaCode)) includes.add('#include <vector>')
-  if (/HashMap|Map</.test(javaCode)) includes.add('#include <unordered_map>')
-  if (/Math\./.test(javaCode)) includes.add('#include <cmath>')
-  if (/String\.format/.test(javaCode)) includes.add('#include <cstdio>')
+  if (/ArrayList|List</.test(javaCode))     includes.add('#include <vector>')
+  if (/HashMap|Map</.test(javaCode))        includes.add('#include <unordered_map>')
+  if (/Math\./.test(javaCode))              includes.add('#include <cmath>')
+  if (/String\.format/.test(javaCode))      includes.add('#include <cstdio>')
+  if (/PriorityQueue/.test(javaCode))       includes.add('#include <queue>')
+  if (/double\[\]|int\[\]/.test(javaCode))  includes.add('#include <vector>')
 
   const hasMain = /public\s+static\s+void\s+main/.test(javaCode)
 
@@ -527,6 +639,8 @@ export function translateToCpp(javaCode) {
 
   let depth = 0
   let inClass = false
+  let classDepth = 0
+  let skipClassDepth = -1   // depth of skipped boilerplate main-wrapper class
   let inSwitch = false
 
   for (const raw of lines) {
@@ -536,29 +650,45 @@ export function translateToCpp(javaCode) {
     switch (type) {
       case 'blank': out.push(''); break
       case 'open_brace': out.push(origIndent + '{'); depth++; break
+
       case 'close_brace': {
+        if (skipClassDepth !== -1 && depth === skipClassDepth) {
+          // closing the skipped boilerplate class — emit nothing
+          skipClassDepth = -1
+        } else if (inClass && depth === classDepth) {
+          out.push(origIndent + '};')
+          inClass = false
+        } else {
+          out.push(origIndent + '}')
+        }
         if (depth > 0) depth--
-        out.push(origIndent + '}')
         break
       }
-      case 'skip': break
-      case 'annotation': break // @Override stripped; C++ uses `override` keyword inline
 
-      case 'import': break // all handled by pre-scan includes
+      case 'skip': break
+      case 'annotation': break
+      case 'import': break
 
       case 'comment': out.push(origIndent + line); break
 
       case 'class_decl': {
+        // If code has main, the first class is Java boilerplate — skip it entirely
+        if (hasMain && skipClassDepth === -1) {
+          skipClassDepth = depth + 1
+          depth++
+          break
+        }
         const parent = rest.parent ? ` : public ${rest.parent}` : ''
         out.push(`${origIndent}class ${rest.name}${parent} {`)
         out.push(`${origIndent}public:`)
         inClass = true
+        classDepth = depth + 1
         depth++
         break
       }
 
       case 'main_method': {
-        out.push(`${origIndent}int main() {`)
+        out.push('int main() {')
         depth++
         break
       }
@@ -582,11 +712,21 @@ export function translateToCpp(javaCode) {
         const coll = convertCollectionType(rest.ftype)
         if (coll) {
           out.push(`${origIndent}${coll.cpp} ${rest.fname};`)
+        } else if (rest.ftype.includes('[]')) {
+          const base = rest.ftype.replace(/\[\]/g, '')
+          const cppBase = TYPE_TO_CPP[base] || base
+          const cppType = `vector<${cppBase}>`
+          if (rest.fval) {
+            const m = rest.fval.match(/new\s+\w+\s*\[\s*(.+)\s*\]/)
+            out.push(`${origIndent}${cppType} ${rest.fname}${m ? `(${m[1]})` : ''};`)
+          } else {
+            out.push(`${origIndent}${cppType} ${rest.fname};`)
+          }
         } else {
           const cppType = TYPE_TO_CPP[rest.ftype] || rest.ftype
           if (rest.fval) {
             const newColl = convertNewCollection(rest.fval)
-            const val = newColl ? '' : ` = ${applyOpMap(rest.fval.replace(/\bnew\s+([A-Z]\w+)\s*\(/g, '$1('), OP_TO_CPP)}`
+            const val = newColl ? '' : ` = ${applyOpMap(convertNewArray(rest.fval.replace(/\bnew\s+([A-Z]\w+)\s*\(/g, '$1('), 'cpp'), OP_TO_CPP)}`
             out.push(`${origIndent}${cppType} ${rest.fname}${val};`)
           } else {
             out.push(`${origIndent}${cppType} ${rest.fname};`)
@@ -596,20 +736,34 @@ export function translateToCpp(javaCode) {
       }
 
       case 'this_assign': {
-        const val = applyOpMap(convertCollectionMethodsCpp(stripSemi(rest.value)), OP_TO_CPP)
+        let val = stripSemi(rest.value)
+        val = convertNewArray(val, 'cpp')
+        val = applyOpMap(convertCollectionMethodsCpp(val), OP_TO_CPP)
         out.push(`${origIndent}this->${rest.field} = ${val};`)
         break
       }
 
       case 'var_decl': {
         const coll = convertCollectionType(rest.vtype)
-        const newColl = convertNewCollection(rest.vval)
         if (coll) {
           out.push(`${origIndent}${coll.cpp} ${rest.vname};`)
+        } else if (rest.vtype.includes('[]')) {
+          const base = rest.vtype.replace(/\[\]/g, '')
+          const cppBase = TYPE_TO_CPP[base] || base
+          const cppType = `vector<${cppBase}>`
+          const m = (rest.vval || '').match(/new\s+\w+\s*\[\s*(.+)\s*\]/)
+          if (m) {
+            out.push(`${origIndent}${cppType} ${rest.vname}(${m[1]});`)
+          } else {
+            let val = convertNewArray(stripSemi(rest.vval), 'cpp')
+            val = applyOpMap(val, OP_TO_CPP)
+            out.push(`${origIndent}${cppType} ${rest.vname} = ${val};`)
+          }
         } else {
           const cppType = TYPE_TO_CPP[rest.vtype] || rest.vtype
           let val = stripSemi(rest.vval)
           val = convertCollectionMethodsCpp(val)
+          val = convertNewArray(val, 'cpp')
           val = val.replace(/\bnew\s+([A-Z]\w+)\s*\(/g, '$1(')
           val = applyOpMap(val, OP_TO_CPP)
           out.push(`${origIndent}${cppType} ${rest.vname} = ${val};`)
@@ -624,7 +778,12 @@ export function translateToCpp(javaCode) {
       }
 
       case 'scanner_init': {
-        out.push(`${origIndent}// cin used directly for input (no Scanner in C++)`)
+        out.push(`${origIndent}// use cin for input`)
+        break
+      }
+
+      case 'scanner_has_next': {
+        out.push(`${origIndent}// assume has next`)
         break
       }
 
@@ -635,14 +794,20 @@ export function translateToCpp(javaCode) {
       }
 
       case 'print_ln': {
-        const arg = applyOpMap(extractPrintArg(line), OP_TO_CPP)
+        const arg = applyOpMap(convertStringConcat(extractPrintArg(line), 'cpp'), OP_TO_CPP)
         out.push(`${origIndent}cout << ${arg} << endl;`)
         break
       }
 
       case 'print': {
-        const arg = applyOpMap(extractPrintArg(line), OP_TO_CPP)
+        const arg = applyOpMap(convertStringConcat(extractPrintArg(line), 'cpp'), OP_TO_CPP)
         out.push(`${origIndent}cout << ${arg};`)
+        break
+      }
+
+      case 'print_f': {
+        const arg = applyOpMap(extractPrintArg(line), OP_TO_CPP)
+        out.push(`${origIndent}printf(${arg});`)
         break
       }
 
@@ -662,9 +827,9 @@ export function translateToCpp(javaCode) {
         break
       }
 
-      case 'case_colon': out.push(`${origIndent}case ${rest.val}:`); break
+      case 'case_colon':   out.push(`${origIndent}case ${rest.val}:`); break
       case 'case_default': out.push(`${origIndent}default:`); break
-      case 'break_stmt': out.push(`${origIndent}break;`); break
+      case 'break_stmt':   out.push(`${origIndent}break;`); break
 
       case 'if_stmt': {
         const cond = applyOpMap(extractCondition(line), OP_TO_CPP)
@@ -724,12 +889,29 @@ export function translateToCpp(javaCode) {
         break
       }
 
+      case 'foreach_method': {
+        const m = line.match(/(\w+)\.forEach\(([^)]+?)\s*(?:=>|->)\s*\{?(.+?)\}?\)/)
+        if (m) {
+          const param = m[2].trim()
+          let body = m[3].trim()
+          body = convertLambda(body, 'cpp')
+          out.push(`${origIndent}for (auto& ${param} : ${m[1]}) {`)
+          out.push(`${origIndent}    ${body};`)
+          out.push(`${origIndent}}`)
+        }
+        break
+      }
+
       case 'raw': {
         let cleaned = line
         cleaned = convertCollectionMethodsCpp(cleaned)
-        cleaned = cleaned.replace(/\bnew\s+([A-Z]\w+)\s*\(/g, '$1(')
+        cleaned = convertLambda(cleaned, 'cpp')
+        cleaned = convertNewArray(cleaned, 'cpp')
+        cleaned = cleaned.replace(/new\s+([A-Z]\w+)\s*\(/g, '$1(')
         cleaned = applyOpMap(cleaned, OP_TO_CPP)
-        cleaned = stripAccessModifiersKeepStatic(cleaned)
+        cleaned = convertStringConcat(cleaned, 'cpp')
+        cleaned = convertStringFormatCpp(cleaned)
+        cleaned = stripAccessModifiers(cleaned)
         if (!cleaned.trim()) break
         const t = cleaned.trim()
         if (!t.endsWith(';') && !t.endsWith('{') && !t.endsWith('}') && !t.startsWith('#') && !t.startsWith('//')) {
@@ -756,6 +938,6 @@ export function translateToCpp(javaCode) {
 export function translate(code, fromLang, toLang) {
   if (!code.trim()) return ''
   if (fromLang === 'java' && toLang === 'python') return translateToPython(code)
-  if (fromLang === 'java' && toLang === 'cpp') return translateToCpp(code)
+  if (fromLang === 'java' && toLang === 'cpp')    return translateToCpp(code)
   return `// Translation from ${fromLang} to ${toLang} — coming in next phase`
 }
