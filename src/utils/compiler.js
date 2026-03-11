@@ -1,111 +1,116 @@
 /**
  * compiler.js
- * Piston API — free, no API key, supports 100+ languages
- * https://github.com/engineer-man/piston
- * Endpoint: https://emkc.org/api/v2/piston/execute
+ * Wandbox API — completely free, no API key, no signup
+ * https://wandbox.org/
  */
 
-// ─── Piston language + version map ───────────────────────────────────────────
-// These are the runtime names Piston uses (not the same as our internal values)
+// ─── Wandbox compiler map ─────────────────────────────────────────────────────
 
-export const PISTON_RUNTIMES = {
-  java:       { language: 'java',        version: '15.0.2'  },
-  python:     { language: 'python',      version: '3.10.0'  },
-  cpp:        { language: 'c++',         version: '10.2.0'  },
-  c:          { language: 'c',           version: '10.2.0'  },
-  csharp:     { language: 'csharp',      version: '6.12.0'  },
-  javascript: { language: 'javascript',  version: '18.15.0' },
-  typescript: { language: 'typescript',  version: '5.0.3'   },
-  kotlin:     { language: 'kotlin',      version: '1.8.20'  },
-  rust:       { language: 'rust',        version: '1.68.2'  },
-  go:         { language: 'go',          version: '1.20.3'  },
-  scala:      { language: 'scala',       version: '3.2.2'   },
-  ruby:       { language: 'ruby',        version: '3.0.1'   },
-  swift:      { language: 'swift',       version: '5.3.3'   },
-  php:        { language: 'php',         version: '8.2.3'   },
-  haskell:    { language: 'haskell',     version: '9.4.4'   },
-  perl:       { language: 'perl',        version: '5.36.0'  },
-  pascal:     { language: 'pascal',      version: '3.2.2'   },
-  d:          { language: 'd',           version: '10.3.0'  },
-  ocaml:      { language: 'ocaml',       version: '4.14.0'  },
+const WANDBOX_COMPILERS = {
+  c:          { compiler: 'gcc-12.2.0',          options: '-x c' },
+  cpp:        { compiler: 'gcc-12.2.0',           options: '' },
+  java:       { compiler: 'openjdk-jdk-17+35',    options: '' },
+  python:     { compiler: 'cpython-3.11.3',       options: '' },
+  ruby:       { compiler: 'ruby-3.2.1',           options: '' },
+  go:         { compiler: 'go-1.20.4',            options: '' },
+  rust:       { compiler: 'rust-1.70.0',          options: '' },
+  scala:      { compiler: 'scala-3.3.0',          options: '' },
+  haskell:    { compiler: 'ghc-9.4.5',            options: '' },
+  ocaml:      { compiler: 'ocaml-4.14.0',         options: '' },
+  perl:       { compiler: 'perl-5.37.3',          options: '' },
+  php:        { compiler: 'php-8.2.6',            options: '' },
+  swift:      { compiler: 'swift-5.8.1',          options: '' },
+  lua:        { compiler: 'lua-5.4.4',            options: '' },
 }
 
-const PISTON_URL = 'https://emkc.org/api/v2/piston/execute'
+// Languages Wandbox doesn't support — show friendly message
+const UNSUPPORTED = {
+  csharp:     'C# (try dotnetfiddle.net)',
+  kotlin:     'Kotlin (try play.kotlinlang.org)',
+  typescript: 'TypeScript (try replit.com)',
+  javascript: 'JavaScript (try replit.com)',
+  pascal:     'Pascal (try tio.run)',
+  d:          'D (try run.dlang.io)',
+}
 
-// File extension Piston needs per language
+// File extension for Wandbox
 const EXTENSIONS = {
-  java: 'java', python: 'py', cpp: 'cpp', c: 'c',
-  csharp: 'cs', javascript: 'js', typescript: 'ts',
-  kotlin: 'kt', rust: 'rs', go: 'go', scala: 'scala',
-  ruby: 'rb', swift: 'swift', php: 'php', haskell: 'hs',
-  perl: 'pl', pascal: 'pas', d: 'd', ocaml: 'ml',
+  c: 'c', cpp: 'cpp', java: 'java', python: 'py', ruby: 'rb',
+  go: 'go', rust: 'rs', scala: 'scala', haskell: 'hs',
+  ocaml: 'ml', perl: 'pl', php: 'php', swift: 'swift', lua: 'lua',
 }
+
+const WANDBOX_URL = 'https://wandbox.org/api/compile.json'
 
 // ─── Main run function ────────────────────────────────────────────────────────
 
 export async function runCode(code, langValue, stdin = '') {
-  const runtime = PISTON_RUNTIMES[langValue]
-  if (!runtime) throw new Error(`No Piston runtime for: ${langValue}`)
-
-  const ext = EXTENSIONS[langValue] || 'txt'
-
-  // Java: Piston needs the filename to match the public class name
-  let filename = `code.${ext}`
-  if (langValue === 'java') {
-    const classMatch = code.match(/public\s+class\s+(\w+)/)
-    filename = classMatch ? `${classMatch[1]}.java` : 'Main.java'
+  // Unsupported language
+  if (UNSUPPORTED[langValue]) {
+    return {
+      stdout: '',
+      stderr: `In-browser execution not supported for ${UNSUPPORTED[langValue]}`,
+      success: false,
+      isUnsupported: true,
+    }
   }
 
-  const res = await fetch(PISTON_URL, {
+  const runtime = WANDBOX_COMPILERS[langValue]
+  if (!runtime) {
+    return {
+      stdout: '',
+      stderr: `No compiler configured for: ${langValue}`,
+      success: false,
+    }
+  }
+
+  // Java: filename must match public class name
+  let filename = `code.${EXTENSIONS[langValue] || 'txt'}`
+  if (langValue === 'java') {
+    const match = code.match(/public\s+class\s+(\w+)/)
+    filename = match ? `${match[1]}.java` : 'Main.java'
+  }
+
+  const body = {
+    compiler: runtime.compiler,
+    code,
+    stdin,
+    'compiler-option-raw': runtime.options || undefined,
+  }
+
+  const res = await fetch(WANDBOX_URL, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      language: runtime.language,
-      version:  runtime.version,
-      files: [{ name: filename, content: code }],
-      stdin,
-      run_timeout: 10000,   // 10s max
-      compile_timeout: 15000,
-    }),
+    body: JSON.stringify(body),
   })
 
   if (!res.ok) {
-    const err = await res.json().catch(() => ({}))
-    throw new Error(err?.message || `Piston API error: HTTP ${res.status}`)
+    const text = await res.text().catch(() => '')
+    throw new Error(`Wandbox error: HTTP ${res.status}. ${text}`)
   }
 
   const data = await res.json()
 
-  // Piston returns { run: { stdout, stderr, code, signal }, compile?: { stdout, stderr } }
-  const compileErr  = data?.compile?.stderr || data?.compile?.stdout || ''
-  const runStdout   = data?.run?.stdout || ''
-  const runStderr   = data?.run?.stderr || ''
-  const exitCode    = data?.run?.code ?? 0
+  /**
+   * Wandbox response fields:
+   * status        — exit code (string, "0" = success)
+   * compiler_output / compiler_error — compile phase
+   * program_output / program_error   — run phase
+   * signal        — e.g. "Killed"
+   */
 
-  const hasCompileErr = compileErr.trim().length > 0
-  const hasRuntimeErr = runStderr.trim().length > 0
+  const compileErr  = (data.compiler_error  || '').trim()
+  const stdout      = (data.program_output  || '').trim()
+  const stderr      = (data.program_error   || '').trim()
+  const exitCode    = parseInt(data.status ?? '0', 10)
+  const hasCompErr  = compileErr.length > 0
 
   return {
-    stdout:      runStdout,
-    stderr:      hasCompileErr ? compileErr : runStderr,
+    stdout,
+    stderr:      hasCompErr ? compileErr : stderr,
     exitCode,
-    success:     !hasCompileErr && exitCode === 0,
-    isCompileErr: hasCompileErr,
+    success:     !hasCompErr && exitCode === 0,
+    isCompileErr: hasCompErr,
     lang:        langValue,
-  }
-}
-
-// ─── Piston runtime availability check ───────────────────────────────────────
-
-let cachedRuntimes = null
-
-export async function fetchAvailableRuntimes() {
-  if (cachedRuntimes) return cachedRuntimes
-  try {
-    const res = await fetch('https://emkc.org/api/v2/piston/runtimes')
-    cachedRuntimes = await res.json()
-    return cachedRuntimes
-  } catch {
-    return []
   }
 }
