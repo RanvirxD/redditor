@@ -616,7 +616,7 @@ export function translateToPython(javaCode) {
   }
 
   return out.join('\n')
-}
+}1
 
 // ─── Java → C++ ───────────────────────────────────────────────────────────────
 

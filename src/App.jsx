@@ -2,23 +2,19 @@ import { useState, useEffect, useRef, useCallback } from 'react'
 import EditorPanel from './components/EditorPanel'
 import LLMSettings from './components/LLMSettings'
 import { translate } from './utils/translator'
-import { translateWithAPI, translateWithWebLLM, isWebLLMReady, PROVIDERS } from './utils/llmTranslator'
-
-const LANGUAGES = [
-  { value: 'java',   label: 'Java' },
-  { value: 'python', label: 'Python' },
-  { value: 'cpp',    label: 'C++' },
-]
+import {
+  translateWithAPI, translateWithWebLLM, isWebLLMReady,
+  PROVIDERS, ALL_LANGUAGES, AST_TARGET_LANGS,
+} from './utils/llmTranslator'
 
 const DEBOUNCE_MS = 600
 
-// Auto-run interval options for LLM (ms). 0 = manual only
 const LLM_INTERVALS = [
   { label: 'Manual', value: 0 },
-  { label: '5s',     value: 5000 },
-  { label: '10s',    value: 10000 },
-  { label: '20s',    value: 20000 },
-  { label: '30s',    value: 30000 },
+  { label: '5s',  value: 5000 },
+  { label: '10s', value: 10000 },
+  { label: '20s', value: 20000 },
+  { label: '30s', value: 30000 },
 ]
 
 const DEFAULT_CODE = `public class Main {
@@ -39,9 +35,7 @@ function loadSettings() {
   try { return JSON.parse(localStorage.getItem('redditor_llm_settings') || '{}') }
   catch { return {} }
 }
-function saveSettings(s) {
-  localStorage.setItem('redditor_llm_settings', JSON.stringify(s))
-}
+function saveSettings(s) { localStorage.setItem('redditor_llm_settings', JSON.stringify(s)) }
 
 const S = {
   btn: (active) => ({
@@ -83,106 +77,132 @@ function ModeToggle({ mode, onToggle, onOpenSettings }) {
   )
 }
 
-// ─── Run LLM Button (smart) ───────────────────────────────────────────────────
+// ─── Run LLM Button ───────────────────────────────────────────────────────────
 
 function RunLLMButton({ codeChanged, onRun, interval, onIntervalChange, anyTranslating }) {
   return (
     <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-      {/* Main button */}
-      <button
-        onClick={onRun}
-        disabled={anyTranslating}
-        style={{
-          display: 'flex', alignItems: 'center', gap: 6,
-          padding: '5px 14px', borderRadius: 4, border: 'none',
-          background: codeChanged ? '#818cf8' : '#1a1a2e',
-          color: codeChanged ? '#fff' : '#818cf8',
-          fontSize: 11, fontFamily: "'JetBrains Mono', monospace",
-          cursor: anyTranslating ? 'not-allowed' : 'pointer',
-          transition: 'all 0.2s',
-          boxShadow: codeChanged ? '0 0 12px rgba(129,140,248,0.4)' : 'none',
-          outline: `1px solid ${codeChanged ? '#818cf8' : '#2a2a3a'}`,
-        }}
-      >
-        {anyTranslating ? (
-          <>
-            <span style={{ display: 'inline-block', width: 8, height: 8, borderRadius: '50%', background: '#facc15', boxShadow: '0 0 6px #facc15', animation: 'pulse 1s infinite' }} />
-            running...
-          </>
-        ) : (
-          <>
-            ⚡ {codeChanged ? 'Run LLM  (code changed)' : 'Run LLM'}
-          </>
-        )}
+      <button onClick={onRun} disabled={anyTranslating} style={{
+        display: 'flex', alignItems: 'center', gap: 6,
+        padding: '5px 14px', borderRadius: 4, border: 'none',
+        background: codeChanged ? '#818cf8' : '#1a1a2e',
+        color: codeChanged ? '#fff' : '#818cf8',
+        fontSize: 11, fontFamily: "'JetBrains Mono', monospace",
+        cursor: anyTranslating ? 'not-allowed' : 'pointer', transition: 'all 0.2s',
+        boxShadow: codeChanged ? '0 0 12px rgba(129,140,248,0.4)' : 'none',
+        outline: `1px solid ${codeChanged ? '#818cf8' : '#2a2a3a'}`,
+      }}>
+        {anyTranslating
+          ? <><span style={{ width: 8, height: 8, borderRadius: '50%', background: '#facc15', display: 'inline-block', boxShadow: '0 0 6px #facc15' }} /> running...</>
+          : <>⚡ {codeChanged ? 'Run LLM (changed)' : 'Run LLM'}</>
+        }
       </button>
-
-      {/* Auto-run interval selector */}
-      <select
-        value={interval}
-        onChange={e => onIntervalChange(Number(e.target.value))}
-        style={{ ...S.select, fontSize: 10, padding: '5px 8px' }}
-        title="Auto-run interval"
-      >
-        {LLM_INTERVALS.map(opt => (
-          <option key={opt.value} value={opt.value}>{opt.label}</option>
-        ))}
+      <select value={interval} onChange={e => onIntervalChange(Number(e.target.value))} style={{ ...S.select, fontSize: 10, padding: '5px 8px' }} title="Auto-run interval">
+        {LLM_INTERVALS.map(opt => <option key={opt.value} value={opt.value}>{opt.label}</option>)}
       </select>
     </div>
   )
 }
 
-// ─── Translate Popover ────────────────────────────────────────────────────────
+// ─── Translate-To Popover ─────────────────────────────────────────────────────
 
-function TranslatePopover({ sourceLang, onConfirm, onClose }) {
+function TranslatePopover({ sourceLang, mode, onConfirm, onClose }) {
   const [selected, setSelected] = useState([])
   const ref = useRef(null)
-  const available = LANGUAGES.filter(l => l.value !== sourceLang)
+
+  // Available targets: in AST mode only python/cpp, in LLM mode all except source
+  const available = mode === 'ast'
+    ? ALL_LANGUAGES.filter(l => AST_TARGET_LANGS.includes(l.value))
+    : ALL_LANGUAGES.filter(l => l.value !== sourceLang)
+
   function toggle(val) {
     setSelected(prev => prev.includes(val) ? prev.filter(v => v !== val) : [...prev, val])
   }
+
   useEffect(() => {
     function h(e) { if (ref.current && !ref.current.contains(e.target)) onClose() }
     document.addEventListener('mousedown', h)
     return () => document.removeEventListener('mousedown', h)
   }, [onClose])
 
+  // Group languages for LLM mode display
+  const groups = mode === 'llm' ? [
+    { label: 'Popular', langs: available.filter(l => ['python','cpp','javascript','java','c','csharp','kotlin','go','rust'].includes(l.value)) },
+    { label: 'Functional', langs: available.filter(l => ['haskell','scala','ocaml'].includes(l.value)) },
+    { label: 'Others', langs: available.filter(l => ['ruby','swift','php','perl','pascal','d','typescript'].includes(l.value)) },
+  ] : [{ label: '', langs: available }]
+
   return (
     <div ref={ref} style={{
       position: 'absolute', top: '100%', left: 0, marginTop: 6,
       background: '#111119', border: '1px solid #2a2a3a', borderRadius: 6,
-      padding: '12px 14px', zIndex: 100, minWidth: 170,
+      padding: '12px 14px', zIndex: 100,
+      minWidth: mode === 'llm' ? 320 : 170,
+      maxHeight: 400, overflowY: 'auto',
       boxShadow: '0 8px 24px rgba(0,0,0,0.5)',
     }}>
-      <p style={{ ...S.label, marginBottom: 10, color: '#4a4a6a', fontSize: 10 }}>select targets</p>
-      {available.map(l => (
-        <label key={l.value} style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8, cursor: 'pointer' }}>
-          <div onClick={() => toggle(l.value)} style={{
-            width: 14, height: 14, borderRadius: 3,
-            border: `1px solid ${selected.includes(l.value) ? '#818cf8' : '#3a3a5a'}`,
-            background: selected.includes(l.value) ? '#818cf8' : 'transparent',
-            flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center',
-          }}>
-            {selected.includes(l.value) && (
-              <svg width="8" height="8" viewBox="0 0 8 8">
-                <polyline points="1,4 3,6 7,2" stroke="#fff" strokeWidth="1.5" fill="none" strokeLinecap="round"/>
-              </svg>
-            )}
-          </div>
-          <span style={{ ...S.label, color: '#e2e2e8', fontSize: 12 }}>{l.label}</span>
-        </label>
+      <p style={{ ...S.label, marginBottom: 10, color: '#4a4a6a', fontSize: 10 }}>
+        {mode === 'ast' ? 'AST supports Python / C++' : 'select target languages'}
+      </p>
+
+      {groups.map(group => (
+        <div key={group.label}>
+          {group.label && (
+            <p style={{ fontSize: 9, color: '#3a3a5a', fontFamily: "'JetBrains Mono', monospace", margin: '8px 0 4px', letterSpacing: '0.08em', textTransform: 'uppercase' }}>
+              {group.label}
+            </p>
+          )}
+          {mode === 'llm' ? (
+            // Grid layout for LLM mode
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 4, marginBottom: 4 }}>
+              {group.langs.map(l => (
+                <div key={l.value} onClick={() => toggle(l.value)} style={{
+                  padding: '5px 8px', borderRadius: 4, cursor: 'pointer',
+                  border: `1px solid ${selected.includes(l.value) ? '#818cf8' : '#2a2a3a'}`,
+                  background: selected.includes(l.value) ? '#1a1a2e' : 'transparent',
+                  color: selected.includes(l.value) ? '#e2e2e8' : '#6b6b8a',
+                  fontSize: 11, fontFamily: "'JetBrains Mono', monospace",
+                  transition: 'all 0.1s', textAlign: 'center',
+                }}>
+                  {l.label}
+                </div>
+              ))}
+            </div>
+          ) : (
+            // List for AST mode
+            group.langs.map(l => (
+              <label key={l.value} style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8, cursor: 'pointer' }}>
+                <div onClick={() => toggle(l.value)} style={{
+                  width: 14, height: 14, borderRadius: 3,
+                  border: `1px solid ${selected.includes(l.value) ? '#818cf8' : '#3a3a5a'}`,
+                  background: selected.includes(l.value) ? '#818cf8' : 'transparent',
+                  flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center',
+                }}>
+                  {selected.includes(l.value) && (
+                    <svg width="8" height="8" viewBox="0 0 8 8">
+                      <polyline points="1,4 3,6 7,2" stroke="#fff" strokeWidth="1.5" fill="none" strokeLinecap="round"/>
+                    </svg>
+                  )}
+                </div>
+                <span style={{ ...S.label, color: '#e2e2e8', fontSize: 12 }}>{l.label}</span>
+              </label>
+            ))
+          )}
+        </div>
       ))}
+
       <button
         disabled={selected.length === 0}
         onClick={() => { onConfirm(selected); onClose() }}
         style={{
-          marginTop: 4, width: '100%',
+          marginTop: 8, width: '100%',
           background: selected.length > 0 ? '#818cf8' : '#1a1a28',
           border: `1px solid ${selected.length > 0 ? '#818cf8' : '#2a2a3a'}`,
           borderRadius: 4, color: selected.length > 0 ? '#fff' : '#4a4a6a',
           fontSize: 11, fontFamily: "'JetBrains Mono', monospace",
           padding: '6px 0', cursor: selected.length > 0 ? 'pointer' : 'not-allowed',
         }}
-      >translate</button>
+      >{selected.length > 0 ? `translate to ${selected.length} language${selected.length > 1 ? 's' : ''}` : 'select at least one'}</button>
     </div>
   )
 }
@@ -190,26 +210,26 @@ function TranslatePopover({ sourceLang, onConfirm, onClose }) {
 // ─── App ──────────────────────────────────────────────────────────────────────
 
 export default function App() {
-  const sourceLang = 'java'
+  const [mode, setMode]                 = useState('ast')
+  const [sourceLang, setSourceLang]     = useState('java')    // dynamic in LLM mode
   const [targetLangs, setTargetLangs]   = useState([])
   const [sourceCode, setSourceCode]     = useState(DEFAULT_CODE)
   const [translated, setTranslated]     = useState({})
   const [status, setStatus]             = useState({})
   const [popoverOpen, setPopoverOpen]   = useState(false)
-  const [mode, setMode]                 = useState('ast')
   const [llmSubMode, setLlmSubMode]     = useState('online')
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [llmSettings, setLlmSettings]   = useState(loadSettings)
   const [llmError, setLlmError]         = useState(null)
-  const [llmInterval, setLlmInterval]   = useState(0)        // auto-run ms
-  const [lastRunCode, setLastRunCode]   = useState('')       // code at last LLM run
-  const debounceRef   = useRef(null)
-  const intervalRef   = useRef(null)
+  const [llmInterval, setLlmInterval]   = useState(0)
+  const [lastRunCode, setLastRunCode]   = useState('')
+  const debounceRef = useRef(null)
+  const intervalRef = useRef(null)
 
-  const codeChanged = mode === 'llm' && sourceCode !== lastRunCode && targetLangs.length > 0
+  const codeChanged    = mode === 'llm' && sourceCode !== lastRunCode && targetLangs.length > 0
   const anyTranslating = Object.values(status).some(s => s === 'translating')
 
-  // ── AST translation ───────────────────────────────────────────────────────
+  // ── AST ────────────────────────────────────────────────────────────────────
 
   const runAST = useCallback((code, src, targets) => {
     const result = {}, newStatus = {}
@@ -221,7 +241,7 @@ export default function App() {
     setStatus(newStatus)
   }, [])
 
-  // ── LLM translation ───────────────────────────────────────────────────────
+  // ── LLM ────────────────────────────────────────────────────────────────────
 
   const runLLM = useCallback(async (code, src, targets) => {
     if (!targets.length) return
@@ -234,10 +254,10 @@ export default function App() {
       try {
         let result
         if (llmSubMode === 'offline') {
-          if (!isWebLLMReady()) throw new Error('No offline model loaded. Open ⚙ LLM Settings → Offline tab.')
+          if (!isWebLLMReady()) throw new Error('No offline model loaded. Open ⚙ → Offline tab.')
           result = await translateWithWebLLM(code, src, tgt)
         } else {
-          if (!llmSettings.apiKey) throw new Error('No API key set. Click ⚙ to configure.')
+          if (!llmSettings.apiKey) throw new Error('No API key. Click ⚙ to configure.')
           result = await translateWithAPI(code, src, tgt, {
             apiKey: llmSettings.apiKey,
             providerId: llmSettings.providerId || 'megallm',
@@ -254,41 +274,48 @@ export default function App() {
     setLastRunCode(code)
   }, [llmSettings, llmSubMode])
 
-  // ── AST: auto on keystroke ────────────────────────────────────────────────
-
+  // Auto AST
   useEffect(() => {
     if (mode !== 'ast' || targetLangs.length === 0) return
-    const p = {}
-    for (const t of targetLangs) p[t] = 'translating'
+    const p = {}; for (const t of targetLangs) p[t] = 'translating'
     setStatus(p)
     clearTimeout(debounceRef.current)
     debounceRef.current = setTimeout(() => runAST(sourceCode, sourceLang, targetLangs), DEBOUNCE_MS)
     return () => clearTimeout(debounceRef.current)
   }, [sourceCode, sourceLang, targetLangs, mode, runAST])
 
-  // ── LLM auto-interval ─────────────────────────────────────────────────────
-
+  // LLM auto-interval
   useEffect(() => {
     clearInterval(intervalRef.current)
     if (mode === 'llm' && llmInterval > 0 && targetLangs.length > 0) {
-      intervalRef.current = setInterval(() => {
-        runLLM(sourceCode, sourceLang, targetLangs)
-      }, llmInterval)
+      intervalRef.current = setInterval(() => runLLM(sourceCode, sourceLang, targetLangs), llmInterval)
     }
     return () => clearInterval(intervalRef.current)
   }, [mode, llmInterval, targetLangs, sourceCode, sourceLang, runLLM])
 
-  // ── Switch mode → retranslate ─────────────────────────────────────────────
-
+  // Retranslate on mode switch
   useEffect(() => {
     if (targetLangs.length === 0) return
     if (mode === 'ast') runAST(sourceCode, sourceLang, targetLangs)
     if (mode === 'llm') runLLM(sourceCode, sourceLang, targetLangs)
   }, [mode]) // eslint-disable-line
 
+  // When switching to AST, force source = java and filter targets
   function handleModeToggle(newMode) {
+    if (newMode === 'ast') {
+      setSourceLang('java')
+      setTargetLangs(prev => prev.filter(t => AST_TARGET_LANGS.includes(t)))
+    }
     setMode(newMode)
     if (newMode === 'llm' && !llmSettings.apiKey && !isWebLLMReady()) setSettingsOpen(true)
+  }
+
+  function handleSourceLangChange(lang) {
+    setSourceLang(lang)
+    setTargetLangs(prev => prev.filter(t => t !== lang))
+    setTranslated({})
+    setStatus({})
+    setSourceCode(`// Write your ${ALL_LANGUAGES.find(l=>l.value===lang)?.label || lang} code here`)
   }
 
   function handleSaveSettings(newSettings) {
@@ -306,7 +333,7 @@ export default function App() {
   }
 
   const providerLabel = PROVIDERS.find(p => p.id === (llmSettings.providerId || 'megallm'))?.name || 'MegaLLM'
-  const modelLabel = (llmSettings.modelId || 'qwen3-coder-flash').split('/').pop().split('-').slice(0,3).join('-')
+  const modelLabel    = (llmSettings.modelId || 'qwen3-coder-flash').split('/').pop().split('-').slice(0,3).join('-')
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100vh', background: '#0a0a0f', overflow: 'hidden' }}>
@@ -332,7 +359,21 @@ export default function App() {
         {/* Center */}
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, position: 'relative' }}>
           <span style={S.label}>source</span>
-          <div style={{ ...S.select, cursor: 'default', color: '#e2e2e8' }}>Java</div>
+
+          {/* Source language: locked to Java in AST, free dropdown in LLM */}
+          {mode === 'ast' ? (
+            <div style={{ ...S.select, cursor: 'default', color: '#e2e2e8' }}>Java</div>
+          ) : (
+            <select
+              value={sourceLang}
+              onChange={e => handleSourceLangChange(e.target.value)}
+              style={{ ...S.select, color: '#e2e2e8' }}
+            >
+              {ALL_LANGUAGES.map(l => (
+                <option key={l.value} value={l.value}>{l.label}</option>
+              ))}
+            </select>
+          )}
 
           <ModeToggle mode={mode} onToggle={handleModeToggle} onOpenSettings={() => setSettingsOpen(true)} />
 
@@ -345,11 +386,16 @@ export default function App() {
               </svg>
             </button>
             {popoverOpen && (
-              <TranslatePopover sourceLang={sourceLang} onConfirm={s => setTargetLangs(s)} onClose={() => setPopoverOpen(false)} />
+              <TranslatePopover
+                sourceLang={sourceLang}
+                mode={mode}
+                onConfirm={s => setTargetLangs(s)}
+                onClose={() => setPopoverOpen(false)}
+              />
             )}
           </div>
 
-          {/* LLM Run button */}
+          {/* LLM run button */}
           {mode === 'llm' && targetLangs.length > 0 && (
             <RunLLMButton
               codeChanged={codeChanged}
@@ -362,7 +408,7 @@ export default function App() {
 
           {/* Target chips */}
           {targetLangs.map(tgt => {
-            const label = LANGUAGES.find(l => l.value === tgt)?.label
+            const label = ALL_LANGUAGES.find(l => l.value === tgt)?.label
             return (
               <div key={tgt} style={{ display: 'flex', alignItems: 'center', gap: 6, background: '#1a1a28', border: '1px solid #2a2a3a', borderRadius: 4, padding: '4px 8px' }}>
                 <span style={{ ...S.label, color: '#e2e2e8', fontSize: 11 }}>{label}</span>
@@ -406,10 +452,8 @@ export default function App() {
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '4px 16px', background: '#0d0d14', borderTop: '1px solid #1e1e2e', flexShrink: 0 }}>
         <span style={{ fontSize: 10, color: '#3a3a5a', fontFamily: "'JetBrains Mono', monospace" }}>
           {mode === 'ast'
-            ? 'AST engine — instant token-based translation'
-            : llmSubMode === 'offline'
-              ? 'LLM offline — running locally via WebLLM'
-              : `LLM online — ${providerLabel} · ${modelLabel} ${llmInterval > 0 ? `· auto-run every ${llmInterval/1000}s` : '· manual'}`
+            ? 'AST engine — Java → Python / C++'
+            : `LLM — ${ALL_LANGUAGES.find(l=>l.value===sourceLang)?.label} → ${targetLangs.map(t => ALL_LANGUAGES.find(l=>l.value===t)?.label).join(', ') || '...'} · ${llmSubMode === 'offline' ? 'WebLLM offline' : providerLabel} ${llmInterval > 0 ? `· auto ${llmInterval/1000}s` : ''}`
           }
         </span>
         <span style={{ fontSize: 10, color: '#3a3a5a', fontFamily: "'JetBrains Mono', monospace" }}>
@@ -417,7 +461,7 @@ export default function App() {
         </span>
       </div>
 
-      {/* ── Settings Modal ── */}
+      {/* Settings */}
       {settingsOpen && (
         <LLMSettings settings={llmSettings} onClose={() => setSettingsOpen(false)} onSave={handleSaveSettings} />
       )}
